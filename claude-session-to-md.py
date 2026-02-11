@@ -211,7 +211,10 @@ def jsonl_to_markdown(jsonl_path, output_path=None):
         output_path = os.path.splitext(jsonl_path)[0] + ".md"
 
     messages = []
-    seen_texts = set()
+    seen_user_texts = set()
+    # Group assistant messages by message ID, keep only the longest (final) version
+    assistant_msgs = {}  # msg_id -> {role, text, timestamp, order}
+    order_counter = 0
 
     with open(jsonl_path, "r") as f:
         for line in f:
@@ -228,30 +231,47 @@ def jsonl_to_markdown(jsonl_path, output_path=None):
             role = message.get("role")
             content = message.get("content")
             timestamp = entry.get("timestamp", "")
+            msg_id = message.get("id", "")
 
             if entry_type == "user" and role == "user" and isinstance(content, str):
-                key = ("user", content)
-                if key not in seen_texts:
-                    seen_texts.add(key)
+                if content not in seen_user_texts:
+                    seen_user_texts.add(content)
                     messages.append({
                         "role": "user",
                         "text": content,
                         "timestamp": timestamp,
+                        "order": order_counter,
                     })
+                    order_counter += 1
 
             if entry_type == "assistant" and role == "assistant" and isinstance(content, list):
-                for block in content:
-                    if block.get("type") == "text":
-                        text = block.get("text", "").strip()
-                        if text:
-                            key = ("assistant", text)
-                            if key not in seen_texts:
-                                seen_texts.add(key)
-                                messages.append({
-                                    "role": "assistant",
-                                    "text": text,
-                                    "timestamp": timestamp,
-                                })
+                # Collect all text blocks from this entry
+                full_text = "\n".join(
+                    block.get("text", "").strip()
+                    for block in content
+                    if block.get("type") == "text" and block.get("text", "").strip()
+                )
+                if not full_text:
+                    continue
+
+                if msg_id and msg_id in assistant_msgs:
+                    # Keep the longer version (later streaming update)
+                    if len(full_text) >= len(assistant_msgs[msg_id]["text"]):
+                        assistant_msgs[msg_id]["text"] = full_text
+                        assistant_msgs[msg_id]["timestamp"] = timestamp
+                else:
+                    key = msg_id or f"_no_id_{order_counter}"
+                    assistant_msgs[key] = {
+                        "role": "assistant",
+                        "text": full_text,
+                        "timestamp": timestamp,
+                        "order": order_counter,
+                    }
+                    order_counter += 1
+
+    # Merge user messages and deduplicated assistant messages, sort by order
+    messages.extend(assistant_msgs.values())
+    messages.sort(key=lambda m: m["order"])
 
     if not messages:
         print(f"  No messages in: {os.path.basename(jsonl_path)}")
@@ -273,9 +293,20 @@ def jsonl_to_markdown(jsonl_path, output_path=None):
     lines.append("---")
     lines.append("")
 
+    # Merge consecutive messages from the same role
+    merged = []
     for msg in messages:
-        # Obsidian callouts: user = question (blue), claude = example (purple)
-        text_lines = msg["text"].splitlines()
+        if merged and merged[-1]["role"] == msg["role"]:
+            merged[-1]["text"] += "\n\n" + msg["text"]
+        else:
+            merged.append(dict(msg))
+
+    for msg in merged:
+        # Strip HTML tags that break Obsidian callouts
+        text = re.sub(r"</?summary>", "", msg["text"]).strip()
+        if not text:
+            continue
+        text_lines = text.splitlines()
         if msg["role"] == "user":
             lines.append("> [!question] User")
         else:
