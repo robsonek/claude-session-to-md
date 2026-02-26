@@ -201,6 +201,29 @@ def get_all_sessions():
     return sessions, session_dir
 
 
+def _escape_html_tags(text):
+    """Escape HTML-like tags outside fenced code blocks.
+
+    Prevents Obsidian from interpreting <string>, <module>, etc. as HTML,
+    which would swallow the content and break callout rendering.
+    """
+    out_lines = []
+    in_code = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            out_lines.append(line)
+            continue
+        if in_code:
+            out_lines.append(line)
+        else:
+            # Escape <tag>, </tag>, <tag attr> — anything that looks like HTML
+            line = re.sub(r"<(/?[a-zA-Z][^>]*)>", r"\\<\1\\>", line)
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
 def jsonl_to_markdown(jsonl_path, output_path=None):
     """Convert a JSONL session file to Markdown."""
     if not os.path.exists(jsonl_path):
@@ -311,8 +334,22 @@ def jsonl_to_markdown(jsonl_path, output_path=None):
             lines.append("> [!question] User")
         else:
             lines.append("> [!example] Claude")
-        for tl in text_lines:
-            lines.append(f"> {tl}")
+
+        # Wrap very long lines in code fences to prevent markdown parser
+        # breakage (e.g. pasted stack traces with []() chars)
+        has_long_lines = any(len(tl) > 500 for tl in text_lines)
+        has_code_fences = "```" in text
+        if has_long_lines and not has_code_fences:
+            lines.append("> ```")
+            for tl in text_lines:
+                lines.append(f"> {tl}")
+            lines.append("> ```")
+        else:
+            # Escape HTML-like tags outside code blocks so Obsidian
+            # doesn't swallow them (e.g. <string>, <module> from tracebacks)
+            text = _escape_html_tags(text)
+            for tl in text.splitlines():
+                lines.append(f"> {tl}")
         lines.append("")
 
     with open(output_path, "w") as f:
